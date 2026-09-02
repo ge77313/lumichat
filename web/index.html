@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#f7f7f2">
+  <meta name="description" content="LumiChat — 一个超轻量、自托管的实时聊天原型">
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
+  <title>LumiChat</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/styles.css?v=7">
+</head>
+<body>
+  <section id="auth" class="auth-shell">
+    <div class="brand-card">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="eyebrow">SELF-HOSTED · LIGHTWEIGHT</p>
+      <h1>把团队对话，<br>留在自己的服务器。</h1>
+      <p class="brand-copy">一个进程，一份数据库，安静地承载频道、私聊与文件。</p>
+      <div class="brand-note"><span class="pulse"></span> 无追踪器 · 无外部依赖 · 数据本地保存</div>
+    </div>
+    <form id="auth-form" class="auth-card">
+      <div>
+        <p class="eyebrow">欢迎使用</p>
+        <h2 id="auth-title">登录 LumiChat</h2>
+        <p id="auth-subtitle">继续你的团队对话</p>
+      </div>
+      <label id="display-field" hidden>显示名称<input name="display_name" autocomplete="name" placeholder="大家怎么称呼你"></label>
+      <label>用户名<input name="username" required autocomplete="username" minlength="3" placeholder="your_name"></label>
+      <label>密码<input name="password" required type="password" autocomplete="current-password" minlength="8" placeholder="至少 8 位"></label>
+      <p id="auth-error" class="form-error" role="alert"></p>
+      <button class="primary" type="submit">登录</button>
+      <button id="auth-toggle" class="text-button" type="button">没有账号？创建一个</button>
+    </form>
+  </section>
+
+  <main id="app" class="app-shell" hidden>
+    <aside class="rail">
+      <button class="logo" aria-label="LumiChat 首页">L</button>
+      <div class="rail-spacer"></div>
+      <button id="theme-button" class="rail-button" title="切换主题" aria-label="切换主题">◐</button>
+      <button id="profile-button" class="avatar" aria-label="个人菜单">?</button>
+    </aside>
+
+    <aside id="sidebar" class="sidebar">
+      <div class="workspace-head">
+        <div><span class="status-dot"></span><strong>LumiChat</strong></div>
+        <button id="sidebar-close" class="icon-button mobile-only" aria-label="关闭侧栏">×</button>
+      </div>
+      <button id="search-button" class="search-trigger"><span>⌕</span> 搜索消息 <kbd>Ctrl K</kbd></button>
+      <nav aria-label="聊天导航">
+        <div class="nav-heading"><span>频道</span><button id="add-channel" title="新建频道">＋</button></div>
+        <div id="channel-list" class="nav-list"></div>
+        <div class="nav-heading"><span>私信</span><button id="refresh-users" title="刷新用户">↻</button></div>
+        <div id="user-list" class="nav-list"></div>
+      </nav>
+      <button id="mobile-profile" class="sidebar-profile">
+        <span id="sidebar-avatar" class="mini-avatar">?</span>
+        <span><strong id="sidebar-name">我的账号</strong><small id="connection-label">正在连接…</small></span>
+        <b>›</b>
+      </button>
+    </aside>
+    <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="关闭侧栏"></button>
+
+    <section class="conversation">
+      <header class="conversation-head">
+        <button id="sidebar-open" class="icon-button mobile-only" aria-label="打开侧栏">☰</button>
+        <div class="conversation-title">
+          <div id="context-icon" class="context-icon">#</div>
+          <div><h2 id="context-title">general</h2><p id="context-subtitle">欢迎来到 LumiChat</p></div>
+        </div>
+        <div class="head-actions">
+          <span id="connection-dot" class="connection-dot" title="连接状态"></span>
+          <button id="search-head" class="icon-button" title="搜索消息" aria-label="搜索消息">⌕</button>
+          <button id="audio-call" class="icon-button call-action" title="语音通话" aria-label="发起语音通话" hidden>☎</button>
+          <button id="video-call" class="icon-button call-action" title="视频通话" aria-label="发起视频通话" hidden>▻</button>
+          <button id="audit-button" class="quiet-button" hidden>全部记录</button>
+          <button id="manage-button" class="quiet-button" hidden>管理用户</button>
+          <button id="logout-button" class="icon-button" title="退出登录" aria-label="退出登录">↪</button>
+        </div>
+      </header>
+      <div id="message-list" class="message-list" aria-live="polite">
+        <button id="load-older" class="load-older" hidden>加载更早消息</button>
+        <div id="message-stream"></div>
+      </div>
+      <form id="composer" class="composer">
+        <div id="reply-preview" class="reply-preview" hidden><span></span><button type="button" aria-label="取消回复">×</button></div>
+        <div id="upload-preview" class="upload-preview" hidden><span></span><button type="button" aria-label="移除附件">×</button></div>
+        <div class="composer-row">
+          <label class="upload-button" title="上传文件">＋<input id="file-input" type="file" hidden></label>
+          <textarea id="message-input" rows="1" maxlength="4000" placeholder="发送消息到 #general"></textarea>
+          <button id="emoji-button" class="emoji-button" type="button" aria-label="添加表情">☺</button>
+          <button class="send-button" type="submit" aria-label="发送消息">↑</button>
+        </div>
+        <div id="emoji-picker" class="emoji-picker" hidden></div>
+      </form>
+    </section>
+  </main>
+
+  <section id="call-layer" class="call-layer" hidden aria-label="通话窗口">
+    <div class="call-stage">
+      <video id="remote-video" autoplay playsinline></video>
+      <div id="call-placeholder" class="call-placeholder"><span id="call-avatar">?</span><h2 id="call-name">通话</h2><p id="call-status">正在连接…</p></div>
+      <video id="local-video" autoplay playsinline muted></video>
+      <div class="call-top"><strong>LumiChat 通话</strong><time id="call-timer">00:00</time></div>
+      <div id="incoming-actions" class="incoming-actions" hidden>
+        <button id="reject-call" class="call-button danger" type="button"><span>×</span>拒绝</button>
+        <button id="accept-call" class="call-button accept" type="button"><span>✓</span>接听</button>
+      </div>
+      <div id="active-call-actions" class="active-call-actions" hidden>
+        <button id="toggle-mic" class="call-button" type="button"><span>♩</span><small>静音</small></button>
+        <button id="toggle-camera" class="call-button" type="button"><span>▣</span><small>摄像头</small></button>
+        <button id="hangup-call" class="call-button danger" type="button"><span>×</span><small>挂断</small></button>
+      </div>
+    </div>
+  </section>
+
+  <dialog id="dialog">
+    <form method="dialog" class="dialog-card">
+      <header><div><p class="eyebrow" id="dialog-eyebrow">LUMICHAT</p><h2 id="dialog-title">操作</h2></div><button value="cancel" class="icon-button">×</button></header>
+      <div id="dialog-body"></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js?v=7" defer></script>
+</body>
+</html>

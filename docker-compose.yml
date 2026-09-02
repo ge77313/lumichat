@@ -1,0 +1,18 @@
+services:
+  lumichat:
+    build: .
+    container_name: lumichat
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - lumichat-data:/app/data
+    environment:
+      RUST_LOG: lumichat=info
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+volumes:
+  lumichat-data:
