@@ -20,6 +20,7 @@ use axum::{
     routing::{get, patch, post},
 };
 use futures_util::{SinkExt, StreamExt};
+use qrcode::{QrCode, render::svg};
 use rand::{Rng, distr::Alphanumeric};
 use rand_core::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -36,16 +37,19 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     events: broadcast::Sender<String>,
     uploads: PathBuf,
+    public_url: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ApiError {
+    #[serde(skip)]
+    status: StatusCode,
     error: String,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, Json(self)).into_response()
+        (self.status, Json(self)).into_response()
     }
 }
 
@@ -53,6 +57,21 @@ type ApiResult<T> = std::result::Result<T, ApiError>;
 
 fn fail(message: impl Into<String>) -> ApiError {
     ApiError {
+        status: StatusCode::BAD_REQUEST,
+        error: message.into(),
+    }
+}
+
+fn hidden_user() -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        error: "用户不可用".into(),
+    }
+}
+
+fn rate_limited(message: impl Into<String>) -> ApiError {
+    ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
         error: message.into(),
     }
 }
@@ -126,6 +145,18 @@ struct MessageUpdate {
     body: String,
 }
 
+#[derive(Deserialize)]
+struct FriendLookup {
+    query: Option<String>,
+    invite_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FriendRequestCreate {
+    identifier: Option<String>,
+    invite_token: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -141,6 +172,10 @@ async fn main() -> Result<()> {
         PathBuf::from(env::var("LUMICHAT_UPLOADS").unwrap_or_else(|_| "data/uploads".into()));
     let web = PathBuf::from(env::var("LUMICHAT_WEB").unwrap_or_else(|_| "web".into()));
     let bind = env::var("LUMICHAT_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let public_url = env::var("LUMICHAT_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://localhost:8080".into())
+        .trim_end_matches('/')
+        .to_string();
 
     if let Some(parent) = Path::new(&database).parent() {
         std::fs::create_dir_all(parent)?;
@@ -153,6 +188,7 @@ async fn main() -> Result<()> {
         db: Arc::new(Mutex::new(conn)),
         events,
         uploads,
+        public_url,
     };
 
     let api = Router::new()
@@ -172,7 +208,20 @@ async fn main() -> Result<()> {
             patch(update_message).delete(delete_message),
         )
         .route("/users", get(list_users))
-        .route("/users/{id}", patch(update_user))
+        .route("/users/{id}", get(user_profile).patch(update_user))
+        .route("/friends", get(list_friends))
+        .route("/friends/{id}", post(block_user).delete(remove_friend))
+        .route("/friends/{id}/unblock", post(unblock_user))
+        .route("/friends/lookup", post(lookup_friend))
+        .route(
+            "/friend-requests",
+            get(list_friend_requests).post(create_friend_request),
+        )
+        .route("/friend-requests/{id}/accept", post(accept_friend_request))
+        .route("/friend-requests/{id}/reject", post(reject_friend_request))
+        .route("/friend-requests/{id}/cancel", post(cancel_friend_request))
+        .route("/friend-invite", get(get_friend_invite))
+        .route("/friend-invite/regenerate", post(regenerate_friend_invite))
         .route(
             "/admin/messages",
             get(admin_messages).delete(clear_all_messages),
@@ -241,6 +290,58 @@ fn initialize(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_recipient_sender ON messages(recipient_id, sender_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+        CREATE TABLE IF NOT EXISTS friendships (
+            user_low INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            user_high INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(user_low,user_high),
+            CHECK(user_low < user_high)
+        );
+        CREATE TABLE IF NOT EXISTS friend_requests (
+            id INTEGER PRIMARY KEY,
+            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected','canceled')),
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            CHECK(sender_id != recipient_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_friend_requests_recipient ON friend_requests(recipient_id,status,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_friend_requests_sender ON friend_requests(sender_id,status,id DESC);
+        CREATE TABLE IF NOT EXISTS user_blocks (
+            blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(blocker_id,blocked_id),
+            CHECK(blocker_id != blocked_id)
+        );
+        CREATE TABLE IF NOT EXISTS friend_invites (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_friend_invites_active_user ON friend_invites(user_id) WHERE active=1;
+        CREATE TABLE IF NOT EXISTS friend_lookup_events (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_friend_lookup_events_user_time ON friend_lookup_events(user_id,created_at);
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        INSERT OR IGNORE INTO friendships(user_low,user_high,created_at)
+        SELECT CASE WHEN sender_id<recipient_id THEN sender_id ELSE recipient_id END,
+               CASE WHEN sender_id<recipient_id THEN recipient_id ELSE sender_id END,
+               MIN(created_at)
+        FROM messages
+        WHERE recipient_id IS NOT NULL AND sender_id != recipient_id
+          AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE name='friends_from_legacy_dm_v8')
+        GROUP BY CASE WHEN sender_id<recipient_id THEN sender_id ELSE recipient_id END,
+                 CASE WHEN sender_id<recipient_id THEN recipient_id ELSE sender_id END;
+        INSERT OR IGNORE INTO schema_migrations(name) VALUES('friends_from_legacy_dm_v8');
         PRAGMA optimize;
     "#)?;
     Ok(())
@@ -269,6 +370,120 @@ fn user_for_token(state: &AppState, token: &str) -> ApiResult<User> {
 
 fn auth(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
     user_for_token(state, token_from(headers)?)
+}
+
+fn friend_pair(a: i64, b: i64) -> (i64, i64) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
+fn is_friend(db: &Connection, a: i64, b: i64) -> bool {
+    let (low, high) = friend_pair(a, b);
+    db.query_row(
+        "SELECT 1 FROM friendships WHERE user_low=?1 AND user_high=?2",
+        params![low, high],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+fn is_blocked(db: &Connection, a: i64, b: i64) -> bool {
+    db.query_row(
+        "SELECT 1 FROM user_blocks WHERE (blocker_id=?1 AND blocked_id=?2) OR (blocker_id=?2 AND blocked_id=?1) LIMIT 1",
+        params![a, b],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+fn limited_user(user: &User) -> Value {
+    json!({"id":user.id,"username":user.username,"display_name":user.display_name})
+}
+
+fn record_lookup(db: &Connection, user_id: i64) -> ApiResult<()> {
+    db.execute(
+        "DELETE FROM friend_lookup_events WHERE created_at<unixepoch()-3600",
+        [],
+    )
+    .map_err(|_| fail("暂时无法查找用户"))?;
+    let minute: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM friend_lookup_events WHERE user_id=?1 AND created_at>=unixepoch()-60",
+            [user_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let hour: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM friend_lookup_events WHERE user_id=?1 AND created_at>=unixepoch()-3600",
+            [user_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if minute >= 10 || hour >= 40 {
+        return Err(rate_limited("查找次数过多，请稍后再试"));
+    }
+    db.execute(
+        "INSERT INTO friend_lookup_events(user_id) VALUES(?1)",
+        [user_id],
+    )
+    .map_err(|_| fail("暂时无法查找用户"))?;
+    Ok(())
+}
+
+fn resolve_friend_target(
+    db: &Connection,
+    viewer_id: i64,
+    identifier: Option<&str>,
+    invite_token: Option<&str>,
+) -> ApiResult<User> {
+    let target = if let Some(token) = invite_token.filter(|v| !v.is_empty()) {
+        if token.len() != 48 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(hidden_user());
+        }
+        db.query_row(
+            "SELECT u.id,u.username,u.display_name,u.role,u.active FROM friend_invites i JOIN users u ON u.id=i.user_id WHERE i.token=?1 AND i.active=1 AND u.active=1",
+            [token],
+            |r| Ok(User{id:r.get(0)?,username:r.get(1)?,display_name:r.get(2)?,role:r.get(3)?,active:r.get::<_,i64>(4)? != 0}),
+        ).optional().map_err(|_| hidden_user())?
+    } else {
+        let raw = identifier.unwrap_or_default().trim();
+        if raw.is_empty() || raw.len() > 24 {
+            return Err(hidden_user());
+        }
+        let by_name = db.query_row(
+            "SELECT id,username,display_name,role,active FROM users WHERE username=?1 COLLATE NOCASE AND active=1",
+            [raw],
+            |r| Ok(User{id:r.get(0)?,username:r.get(1)?,display_name:r.get(2)?,role:r.get(3)?,active:r.get::<_,i64>(4)? != 0}),
+        ).optional().map_err(|_| hidden_user())?;
+        if by_name.is_some() {
+            by_name
+        } else if raw.chars().all(|c| c.is_ascii_digit()) {
+            raw.parse::<i64>().ok().and_then(|id| db.query_row(
+                "SELECT id,username,display_name,role,active FROM users WHERE id=?1 AND active=1",
+                [id],
+                |r| Ok(User{id:r.get(0)?,username:r.get(1)?,display_name:r.get(2)?,role:r.get(3)?,active:r.get::<_,i64>(4)? != 0}),
+            ).optional().ok().flatten())
+        } else {
+            None
+        }
+    }
+    .ok_or_else(hidden_user)?;
+    if target.id == viewer_id || !target.active || is_blocked(db, viewer_id, target.id) {
+        return Err(hidden_user());
+    }
+    Ok(target)
+}
+
+fn friendship_event(state: &AppState, a: i64, b: i64) {
+    let _ = state
+        .events
+        .send(json!({"type":"friend_changed","scope":"friend","user_ids":[a,b]}).to_string());
 }
 
 fn clean_username(value: &str) -> ApiResult<String> {
@@ -525,6 +740,13 @@ async fn dm_history(
     let user = auth(&state, &headers)?;
     let before = query.before.unwrap_or(i64::MAX);
     let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let has_history: i64 = db.query_row(
+        "SELECT COUNT(*) FROM messages WHERE (sender_id=?1 AND recipient_id=?2) OR (sender_id=?2 AND recipient_id=?1)",
+        params![user.id,other], |r| r.get(0)
+    ).unwrap_or(0);
+    if !is_friend(&db, user.id, other) && has_history == 0 {
+        return Err(hidden_user());
+    }
     Ok(Json(messages(
         &db,
         "SELECT m.id,m.body,m.file_url,m.created_at,u.id,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.id<?1 AND ((m.sender_id=?2 AND m.recipient_id=?3) OR (m.sender_id=?3 AND m.recipient_id=?2)) ORDER BY m.id DESC LIMIT 60",
@@ -544,6 +766,19 @@ async fn send_dm(
         return Err(fail("消息不能为空"));
     }
     let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let target_active: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM users WHERE id=?1 AND active=1",
+            [recipient],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if target_active == 0
+        || !is_friend(&db, user.id, recipient)
+        || is_blocked(&db, user.id, recipient)
+    {
+        return Err(hidden_user());
+    }
     db.execute(
         "INSERT INTO messages(sender_id,recipient_id,body,file_url) VALUES(?1,?2,?3,?4)",
         params![user.id, recipient, body, input.file_url],
@@ -629,13 +864,377 @@ async fn delete_message(
 }
 
 async fn list_users(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth(&state, &headers)?;
+    let admin = auth(&state, &headers)?;
+    if admin.role != "admin" {
+        return Err(hidden_user());
+    }
     let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
     let mut stmt = db
         .prepare("SELECT id,username,display_name,role,active FROM users ORDER BY display_name")
         .map_err(|_| fail("无法读取用户"))?;
     let rows = stmt.query_map([], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"username":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?,"role":r.get::<_,String>(3)?,"active":r.get::<_,i64>(4)? != 0}))).map_err(|_| fail("无法读取用户"))?;
     Ok(Json(Value::Array(rows.filter_map(Result::ok).collect())))
+}
+
+async fn user_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let viewer = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    if viewer.id != id && viewer.role != "admin" && !is_friend(&db, viewer.id, id) {
+        return Err(hidden_user());
+    }
+    let user = db
+        .query_row(
+            "SELECT id,username,display_name,role,active FROM users WHERE id=?1 AND active=1",
+            [id],
+            |r| {
+                Ok(User {
+                    id: r.get(0)?,
+                    username: r.get(1)?,
+                    display_name: r.get(2)?,
+                    role: r.get(3)?,
+                    active: r.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| hidden_user())?
+        .ok_or_else(hidden_user)?;
+    Ok(Json(if viewer.role == "admin" || viewer.id == id {
+        serde_json::to_value(user).unwrap_or(Value::Null)
+    } else {
+        limited_user(&user)
+    }))
+}
+
+async fn list_friends(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let mut stmt = db.prepare(
+        "SELECT u.id,u.username,u.display_name
+         FROM friendships f JOIN users u ON u.id=CASE WHEN f.user_low=?1 THEN f.user_high ELSE f.user_low END
+         WHERE (f.user_low=?1 OR f.user_high=?1) AND u.active=1
+           AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=?1 AND b.blocked_id=u.id) OR (b.blocker_id=u.id AND b.blocked_id=?1))
+         ORDER BY u.display_name COLLATE NOCASE"
+    ).map_err(|_| fail("无法读取联系人"))?;
+    let rows = stmt.query_map([user.id], |r| Ok(json!({
+        "id":r.get::<_,i64>(0)?,"username":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?,"active":true
+    }))).map_err(|_| fail("无法读取联系人"))?;
+    Ok(Json(Value::Array(rows.filter_map(Result::ok).collect())))
+}
+
+async fn lookup_friend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<FriendLookup>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    record_lookup(&db, user.id)?;
+    let target = resolve_friend_target(
+        &db,
+        user.id,
+        input.query.as_deref(),
+        input.invite_token.as_deref(),
+    )?;
+    let relationship = if is_friend(&db, user.id, target.id) {
+        "friend".to_string()
+    } else {
+        db.query_row(
+            "SELECT CASE WHEN sender_id=?1 THEN 'outgoing' ELSE 'incoming' END FROM friend_requests WHERE status='pending' AND ((sender_id=?1 AND recipient_id=?2) OR (sender_id=?2 AND recipient_id=?1)) ORDER BY id DESC LIMIT 1",
+            params![user.id,target.id], |r| r.get::<_,String>(0)
+        ).optional().ok().flatten().unwrap_or_else(|| "none".into())
+    };
+    Ok(Json(
+        json!({"user":limited_user(&target),"relationship":relationship}),
+    ))
+}
+
+async fn list_friend_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let incoming = {
+        let mut stmt = db.prepare(
+            "SELECT fr.id,fr.created_at,u.id,u.username,u.display_name FROM friend_requests fr JOIN users u ON u.id=fr.sender_id WHERE fr.recipient_id=?1 AND fr.status='pending' ORDER BY fr.id DESC"
+        ).map_err(|_| fail("无法读取好友申请"))?;
+        let rows = stmt.query_map([user.id], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"created_at":r.get::<_,i64>(1)?,"user":{"id":r.get::<_,i64>(2)?,"username":r.get::<_,String>(3)?,"display_name":r.get::<_,String>(4)?}}))).map_err(|_| fail("无法读取好友申请"))?;
+        rows.filter_map(Result::ok).collect::<Vec<_>>()
+    };
+    let outgoing = {
+        let mut stmt = db.prepare(
+            "SELECT fr.id,fr.created_at,u.id,u.username,u.display_name FROM friend_requests fr JOIN users u ON u.id=fr.recipient_id WHERE fr.sender_id=?1 AND fr.status='pending' ORDER BY fr.id DESC"
+        ).map_err(|_| fail("无法读取好友申请"))?;
+        let rows = stmt.query_map([user.id], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"created_at":r.get::<_,i64>(1)?,"user":{"id":r.get::<_,i64>(2)?,"username":r.get::<_,String>(3)?,"display_name":r.get::<_,String>(4)?}}))).map_err(|_| fail("无法读取好友申请"))?;
+        rows.filter_map(Result::ok).collect::<Vec<_>>()
+    };
+    Ok(Json(json!({"incoming":incoming,"outgoing":outgoing})))
+}
+
+async fn create_friend_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<FriendRequestCreate>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    if input.invite_token.is_none() {
+        record_lookup(&db, user.id)?;
+    }
+    let target = resolve_friend_target(
+        &db,
+        user.id,
+        input.identifier.as_deref(),
+        input.invite_token.as_deref(),
+    )?;
+    if is_friend(&db, user.id, target.id) {
+        return Err(fail("你们已经是好友"));
+    }
+    let pending: i64 = db.query_row(
+        "SELECT COUNT(*) FROM friend_requests WHERE status='pending' AND ((sender_id=?1 AND recipient_id=?2) OR (sender_id=?2 AND recipient_id=?1))",
+        params![user.id,target.id], |r| r.get(0)
+    ).unwrap_or(0);
+    if pending > 0 {
+        return Err(fail("已有待处理的好友申请"));
+    }
+    let recent: i64 = db.query_row(
+        "SELECT COUNT(*) FROM friend_requests WHERE sender_id=?1 AND recipient_id=?2 AND created_at>=unixepoch()-60",
+        params![user.id,target.id], |r| r.get(0)
+    ).unwrap_or(0);
+    if recent > 0 {
+        return Err(rate_limited("操作太频繁，请稍后再试"));
+    }
+    db.execute(
+        "INSERT INTO friend_requests(sender_id,recipient_id) VALUES(?1,?2)",
+        params![user.id, target.id],
+    )
+    .map_err(|_| fail("无法发送好友申请"))?;
+    let id = db.last_insert_rowid();
+    drop(db);
+    friendship_event(&state, user.id, target.id);
+    Ok(Json(
+        json!({"id":id,"status":"pending","user":limited_user(&target)}),
+    ))
+}
+
+async fn accept_friend_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let mut db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let sender: i64 = db.query_row(
+        "SELECT sender_id FROM friend_requests WHERE id=?1 AND recipient_id=?2 AND status='pending'",
+        params![id,user.id], |r| r.get(0)
+    ).optional().map_err(|_| fail("无法处理好友申请"))?.ok_or_else(|| fail("好友申请不可用"))?;
+    if is_blocked(&db, user.id, sender) {
+        return Err(fail("好友申请不可用"));
+    }
+    let (low, high) = friend_pair(user.id, sender);
+    let tx = db.transaction().map_err(|_| fail("无法处理好友申请"))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO friendships(user_low,user_high) VALUES(?1,?2)",
+        params![low, high],
+    )
+    .map_err(|_| fail("无法建立好友关系"))?;
+    tx.execute(
+        "UPDATE friend_requests SET status='accepted',updated_at=unixepoch() WHERE id=?1",
+        [id],
+    )
+    .map_err(|_| fail("无法处理好友申请"))?;
+    tx.execute("UPDATE friend_requests SET status='canceled',updated_at=unixepoch() WHERE status='pending' AND id!=?1 AND ((sender_id=?2 AND recipient_id=?3) OR (sender_id=?3 AND recipient_id=?2))", params![id,user.id,sender]).ok();
+    tx.commit().map_err(|_| fail("无法建立好友关系"))?;
+    drop(db);
+    friendship_event(&state, user.id, sender);
+    Ok(Json(json!({"status":"accepted"})))
+}
+
+async fn reject_friend_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let sender: Option<i64> = db.query_row("SELECT sender_id FROM friend_requests WHERE id=?1 AND recipient_id=?2 AND status='pending'", params![id,user.id], |r| r.get(0)).optional().map_err(|_| fail("无法处理好友申请"))?;
+    let sender = sender.ok_or_else(|| fail("好友申请不可用"))?;
+    db.execute(
+        "UPDATE friend_requests SET status='rejected',updated_at=unixepoch() WHERE id=?1",
+        [id],
+    )
+    .map_err(|_| fail("无法处理好友申请"))?;
+    drop(db);
+    friendship_event(&state, user.id, sender);
+    Ok(Json(json!({"status":"rejected"})))
+}
+
+async fn cancel_friend_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let recipient: Option<i64> = db.query_row("SELECT recipient_id FROM friend_requests WHERE id=?1 AND sender_id=?2 AND status='pending'", params![id,user.id], |r| r.get(0)).optional().map_err(|_| fail("无法处理好友申请"))?;
+    let recipient = recipient.ok_or_else(|| fail("好友申请不可用"))?;
+    db.execute(
+        "UPDATE friend_requests SET status='canceled',updated_at=unixepoch() WHERE id=?1",
+        [id],
+    )
+    .map_err(|_| fail("无法处理好友申请"))?;
+    drop(db);
+    friendship_event(&state, user.id, recipient);
+    Ok(Json(json!({"status":"canceled"})))
+}
+
+async fn remove_friend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(other): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let (low, high) = friend_pair(user.id, other);
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let changed = db
+        .execute(
+            "DELETE FROM friendships WHERE user_low=?1 AND user_high=?2",
+            params![low, high],
+        )
+        .map_err(|_| fail("无法删除好友"))?;
+    if changed == 0 {
+        return Err(hidden_user());
+    }
+    drop(db);
+    friendship_event(&state, user.id, other);
+    Ok(Json(json!({"status":"removed"})))
+}
+
+async fn block_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(other): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    if user.id == other {
+        return Err(hidden_user());
+    }
+    let mut db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let known = is_friend(&db,user.id,other) || db.query_row(
+        "SELECT 1 FROM friend_requests WHERE status='pending' AND ((sender_id=?1 AND recipient_id=?2) OR (sender_id=?2 AND recipient_id=?1)) LIMIT 1",
+        params![user.id,other], |_| Ok(())
+    ).optional().ok().flatten().is_some();
+    if !known {
+        return Err(hidden_user());
+    }
+    let (low, high) = friend_pair(user.id, other);
+    let tx = db.transaction().map_err(|_| fail("无法拉黑用户"))?;
+    tx.execute(
+        "DELETE FROM friendships WHERE user_low=?1 AND user_high=?2",
+        params![low, high],
+    )
+    .map_err(|_| fail("无法拉黑用户"))?;
+    tx.execute("UPDATE friend_requests SET status='rejected',updated_at=unixepoch() WHERE status='pending' AND ((sender_id=?1 AND recipient_id=?2) OR (sender_id=?2 AND recipient_id=?1))", params![user.id,other]).map_err(|_| fail("无法拉黑用户"))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO user_blocks(blocker_id,blocked_id) VALUES(?1,?2)",
+        params![user.id, other],
+    )
+    .map_err(|_| fail("无法拉黑用户"))?;
+    tx.commit().map_err(|_| fail("无法拉黑用户"))?;
+    drop(db);
+    friendship_event(&state, user.id, other);
+    Ok(Json(json!({"status":"blocked"})))
+}
+
+async fn unblock_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(other): AxumPath<i64>,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+    let changed = db
+        .execute(
+            "DELETE FROM user_blocks WHERE blocker_id=?1 AND blocked_id=?2",
+            params![user.id, other],
+        )
+        .map_err(|_| fail("无法解除拉黑"))?;
+    if changed == 0 {
+        return Err(hidden_user());
+    }
+    Ok(Json(json!({"status":"unblocked"})))
+}
+
+fn active_invite(db: &Connection, user_id: i64) -> ApiResult<String> {
+    if let Some(token) = db
+        .query_row(
+            "SELECT token FROM friend_invites WHERE user_id=?1 AND active=1",
+            [user_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| fail("无法读取邀请码"))?
+    {
+        return Ok(token);
+    }
+    let token = new_token();
+    db.execute(
+        "INSERT INTO friend_invites(token,user_id) VALUES(?1,?2)",
+        params![token, user_id],
+    )
+    .map_err(|_| fail("无法创建邀请码"))?;
+    Ok(token)
+}
+
+fn invite_response(state: &AppState, user_id: i64, token: String) -> ApiResult<Json<Value>> {
+    let path = format!("/invite/{token}");
+    let url = format!("{}{}", state.public_url, path);
+    let code = QrCode::new(url.as_bytes()).map_err(|_| fail("无法生成二维码"))?;
+    let qr_svg = code.render::<svg::Color>().min_dimensions(260, 260).build();
+    Ok(Json(
+        json!({"token":token,"path":path,"url":url,"qr_svg":qr_svg,"uid":user_id}),
+    ))
+}
+
+async fn get_friend_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let token = {
+        let db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+        active_invite(&db, user.id)?
+    };
+    invite_response(&state, user.id, token)
+}
+
+async fn regenerate_friend_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    let user = auth(&state, &headers)?;
+    let token = new_token();
+    {
+        let mut db = state.db.lock().map_err(|_| fail("数据库暂不可用"))?;
+        let tx = db.transaction().map_err(|_| fail("无法更新邀请码"))?;
+        tx.execute(
+            "UPDATE friend_invites SET active=0 WHERE user_id=?1",
+            [user.id],
+        )
+        .map_err(|_| fail("无法更新邀请码"))?;
+        tx.execute(
+            "INSERT INTO friend_invites(token,user_id) VALUES(?1,?2)",
+            params![token, user.id],
+        )
+        .map_err(|_| fail("无法更新邀请码"))?;
+        tx.commit().map_err(|_| fail("无法更新邀请码"))?;
+    }
+    invite_response(&state, user.id, token)
 }
 
 async fn update_user(
@@ -900,6 +1499,9 @@ async fn ws_loop(socket: WebSocket, state: AppState, user: User) {
                             return event.get("to_user_id").and_then(Value::as_i64) == Some(user.id)
                                 || event.pointer("/from/id").and_then(Value::as_i64) == Some(user.id);
                         }
+                        if event.get("scope").and_then(Value::as_str) == Some("friend") {
+                            return event.get("user_ids").and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|id| id.as_i64() == Some(user.id)));
+                        }
                         event.get("scope").and_then(Value::as_str) != Some("dm")
                             || event.get("recipient_id").and_then(Value::as_i64) == Some(user.id)
                             || event.pointer("/message/sender/id").and_then(Value::as_i64) == Some(user.id)
@@ -916,10 +1518,11 @@ async fn ws_loop(socket: WebSocket, state: AppState, user: User) {
                         let allowed = matches!(event_type, "call_offer" | "call_answer" | "ice_candidate" | "call_end" | "call_reject");
                         let target = signal.get("to_user_id").and_then(Value::as_i64).unwrap_or_default();
                         if allowed && target > 0 && target != user.id {
-                            let target_active = state.db.lock().ok().and_then(|db| {
-                                db.query_row("SELECT active FROM users WHERE id=?1", [target], |r| r.get::<_, i64>(0)).optional().ok().flatten()
-                            }) == Some(1);
-                            if target_active {
+                            let target_allowed = state.db.lock().ok().is_some_and(|db| {
+                                let active = db.query_row("SELECT active FROM users WHERE id=?1", [target], |r| r.get::<_, i64>(0)).optional().ok().flatten() == Some(1);
+                                active && is_friend(&db,user.id,target) && !is_blocked(&db,user.id,target)
+                            });
+                            if target_allowed {
                                 signal["from"] = serde_json::to_value(&user).unwrap_or(Value::Null);
                                 let _ = state.events.send(signal.to_string());
                             }

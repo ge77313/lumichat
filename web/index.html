@@ -8,7 +8,7 @@
   <meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">
   <title>LumiChat</title>
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/styles.css?v=7">
+  <link rel="stylesheet" href="/styles.css?v=8">
 </head>
 <body>
   <section id="auth" class="auth-shell">
@@ -51,7 +51,7 @@
       <nav aria-label="聊天导航">
         <div class="nav-heading"><span>频道</span><button id="add-channel" title="新建频道">＋</button></div>
         <div id="channel-list" class="nav-list"></div>
-        <div class="nav-heading"><span>私信</span><button id="refresh-users" title="刷新用户">↻</button></div>
+        <div class="nav-heading"><span>联系人</span><span class="nav-heading-actions"><button id="friend-requests" title="好友申请">申请</button><button id="add-friend" title="添加好友">＋</button><button id="refresh-users" title="刷新联系人">↻</button></span></div>
         <div id="user-list" class="nav-list"></div>
       </nav>
       <button id="mobile-profile" class="sidebar-profile">
@@ -74,6 +74,7 @@
           <button id="search-head" class="icon-button" title="搜索消息" aria-label="搜索消息">⌕</button>
           <button id="audio-call" class="icon-button call-action" title="语音通话" aria-label="发起语音通话" hidden>☎</button>
           <button id="video-call" class="icon-button call-action" title="视频通话" aria-label="发起视频通话" hidden>▻</button>
+          <button id="friend-actions" class="icon-button" title="好友设置" aria-label="好友设置" hidden>•••</button>
           <button id="audit-button" class="quiet-button" hidden>全部记录</button>
           <button id="manage-button" class="quiet-button" hidden>管理用户</button>
           <button id="logout-button" class="icon-button" title="退出登录" aria-label="退出登录">↪</button>
@@ -123,6 +124,6 @@
   </dialog>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/app.js?v=7" defer></script>
+  <script src="/app.js?v=8" defer></script>
 </body>
 </html>
