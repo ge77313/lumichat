@@ -3,14 +3,15 @@
 ## Source
 
 - Selected direction: Product Design option 2, Apple-inspired focused reading room.
+- Reference image: 临时设计参考图（未随仓库发布）
 - Reference dimensions: 1487 × 1058 px.
 
 ## Implementation captures
 
-- Desktop implementation: `work/ui-v8-desktop.png`
+- Desktop implementation: 临时浏览器验收截图（未随仓库发布）
 - Capture dimensions: 1280 × 720 px.
 - State: authenticated user, accepted friend selected, realistic text/image conversation, channel/contact navigation visible.
-- Comparison artifact: `work/design-comparison.png`.
+- Comparison artifact: 临时对照图（未随仓库发布）。
 
 ## Visible comparison
 
