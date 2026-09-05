@@ -2,7 +2,6 @@
 
 LumiChat 是一个从零实现、MIT 许可的超轻量自托管聊天系统。项目采用单体 Rust 后端、零构建依赖的静态 Web 前端、SQLite 和本地文件存储，保持轻量、独立和可自托管。
 
-
 ## 核心能力
 
 - 注册、登录与管理员账号管理（首个注册用户自动成为管理员）
@@ -48,7 +47,32 @@ lumichat/
 docker compose up --build -d
 ```
 
-Linux 服务器也可以直接运行 `chmod +x install.sh && ./install.sh`；Windows Docker Desktop 使用 `./install.ps1`。脚本会构建、启动并等待健康检查，不会删除已有数据。详见 [DEPLOY.md](DEPLOY.md)。
+### 一键部署
+
+在已安装 Docker 的 Linux 服务器上，先拉取私有仓库，再运行安装脚本：
+
+```bash
+git clone https://github.com/ge77313/lumichat.git
+cd lumichat
+chmod +x install.sh
+./install.sh
+```
+
+也可以在已有项目目录中直接执行：
+
+```bash
+bash install.sh
+```
+
+Windows Docker Desktop 用户运行：
+
+```powershell
+./install.ps1
+```
+
+本仓库为 Private，不能使用匿名 `curl raw.githubusercontent.com` 下载脚本；协作者需先登录 GitHub 或配置 SSH/PAT 后再执行上述命令。脚本会构建镜像、启动容器并等待健康检查，不会删除已有数据。
+
+更多部署选项、反向代理与 HTTPS 配置见 [DEPLOY.md](DEPLOY.md)。
 
 默认监听 `http://localhost:8080`，数据位于命名卷 `lumichat-data`。生产环境应在服务前配置 HTTPS 反向代理；麦克风和摄像头在非 localhost 环境下需要 HTTPS。
 
