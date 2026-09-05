@@ -70,7 +70,7 @@ Windows Docker Desktop 用户运行：
 ./install.ps1
 ```
 
-本仓库为 Private，不能使用匿名 `curl raw.githubusercontent.com` 下载脚本；协作者需先登录 GitHub 或配置 SSH/PAT 后再执行上述命令。脚本会构建镜像、启动容器并等待健康检查，不会删除已有数据。
+本仓库为 Public，可直接通过 GitHub 拉取源码。脚本会构建镜像、启动容器并等待健康检查，不会删除已有数据。
 
 更多部署选项、反向代理与 HTTPS 配置见 [DEPLOY.md](DEPLOY.md)。
 
