@@ -49,7 +49,7 @@ docker compose up --build -d
 
 ### 一键部署
 
-在已安装 Docker 的 Linux 服务器上，先拉取私有仓库，再运行安装脚本：
+在已安装 Docker 的 Linux 服务器上，先拉取公开仓库，再运行安装脚本：
 
 ```bash
 git clone https://github.com/ge77313/lumichat.git
