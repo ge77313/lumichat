@@ -1,4 +1,6 @@
 /target/
 /data/
+/dist/
+/work/
 *.db-shm
 *.db-wal
