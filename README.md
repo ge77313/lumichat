@@ -35,6 +35,8 @@ lumichat/
 ├── tests/ws_signaling_regression.py # 通话信令权限回归
 ├── Dockerfile                       # 两阶段精简镜像
 ├── docker-compose.yml               # 单服务与持久数据卷
+├── install.sh / install.ps1         # Linux / Windows 一键启动脚本
+├── DEPLOY.md                         # 一键部署与 HTTPS 说明
 ├── BASELINE.md                      # 性能基线
 ├── IMPLEMENTATION_REPORT.md         # 本次好友制实现报告
 └── design-qa.md                     # UI 对照与响应式验收
@@ -45,6 +47,8 @@ lumichat/
 ```bash
 docker compose up --build -d
 ```
+
+Linux 服务器也可以直接运行 `chmod +x install.sh && ./install.sh`；Windows Docker Desktop 使用 `./install.ps1`。脚本会构建、启动并等待健康检查，不会删除已有数据。详见 [DEPLOY.md](DEPLOY.md)。
 
 默认监听 `http://localhost:8080`，数据位于命名卷 `lumichat-data`。生产环境应在服务前配置 HTTPS 反向代理；麦克风和摄像头在非 localhost 环境下需要 HTTPS。
 
